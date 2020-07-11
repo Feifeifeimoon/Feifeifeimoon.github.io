@@ -79,19 +79,23 @@
 
 
 
-<meta name="description" content="sync.Once可以保证在多个协程或者多次调用一个函数时，函数最终只会执行一次。 使用方法123456789101112131415var once sync.Oncefunc InitFunc() &amp;#123;	fmt.Println(&quot;Init Func&quot;);&amp;#125;func main() &amp;#123;	for i :&#x3D; 0; i &lt; 10; i++&amp;#123;		once.Do(">
+<meta name="description" content="为了分配管理内存，首先要知道哪些内存已经使用哪些内存是空闲的，目前主要有两种方式：线性分配(Bump Allocator)和可利用空间表(Free-List Allocator)。 线性分配 Bump Allocator线性分配非常简单，这种方式只需要维护一个指针，初始时指向内存的起点，当分配内存时，只需检测空闲内存是否足够并不断地移动指针位置即可。   线性分配在分配内存时高效且快速，但是在内存">
 <meta property="og:type" content="article">
-<meta property="og:title" content="sync.Once分析">
-<meta property="og:url" content="http://yoursite.com/2020/04/06/sync-Once%E5%88%86%E6%9E%90/index.html">
+<meta property="og:title" content="Golang内存分配:(1):Free-List">
+<meta property="og:url" content="http://yoursite.com/2020/04/11/Free-List/index.html">
 <meta property="og:site_name" content="飞飞飞">
-<meta property="og:description" content="sync.Once可以保证在多个协程或者多次调用一个函数时，函数最终只会执行一次。 使用方法123456789101112131415var once sync.Oncefunc InitFunc() &amp;#123;	fmt.Println(&quot;Init Func&quot;);&amp;#125;func main() &amp;#123;	for i :&#x3D; 0; i &lt; 10; i++&amp;#123;		once.Do(">
-<meta property="article:published_time" content="2020-04-06T01:23:13.000Z">
-<meta property="article:modified_time" content="2020-04-06T02:29:29.229Z">
+<meta property="og:description" content="为了分配管理内存，首先要知道哪些内存已经使用哪些内存是空闲的，目前主要有两种方式：线性分配(Bump Allocator)和可利用空间表(Free-List Allocator)。 线性分配 Bump Allocator线性分配非常简单，这种方式只需要维护一个指针，初始时指向内存的起点，当分配内存时，只需检测空闲内存是否足够并不断地移动指针位置即可。   线性分配在分配内存时高效且快速，但是在内存">
+<meta property="og:image" content="http://yoursite.com/2020/04/11/Free-List/%E7%BA%BF%E6%80%A7%E5%88%86%E9%85%8D.jpg">
+<meta property="og:image" content="http://yoursite.com/2020/04/11/Free-List/%E8%8A%82%E7%82%B9%E5%A4%A7%E5%B0%8F%E7%9B%B8%E5%90%8C.jpg">
+<meta property="og:image" content="http://yoursite.com/2020/04/11/Free-List/%E5%A4%9A%E6%9D%A1%E9%93%BE%E8%A1%A8.jpg">
+<meta property="article:published_time" content="2020-04-11T14:09:38.000Z">
+<meta property="article:modified_time" content="2020-04-15T02:35:04.188Z">
 <meta property="article:author" content="Feifeifei">
 <meta property="article:tag" content="Golang">
 <meta property="article:tag" content="C++">
 <meta property="article:tag" content="Linux">
 <meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="http://yoursite.com/2020/04/11/Free-List/%E7%BA%BF%E6%80%A7%E5%88%86%E9%85%8D.jpg">
 
 
 
@@ -121,13 +125,13 @@
 
 
 
-  <link rel="canonical" href="http://yoursite.com/2020/04/06/sync-Once分析/"/>
+  <link rel="canonical" href="http://yoursite.com/2020/04/11/Free-List/"/>
 
 
 
 
 
-  <title>sync.Once分析 | 飞飞飞</title>
+  <title>Golang内存分配:(1):Free-List | 飞飞飞</title>
   
 
 
@@ -244,7 +248,7 @@
   
   
   <div class="post-block">
-    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2020/04/06/sync-Once%E5%88%86%E6%9E%90/">
+    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2020/04/11/Free-List/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
       <meta itemprop="name" content="Feifeifei">
@@ -261,7 +265,7 @@
 
         
         
-          <h1 class="post-title" itemprop="name headline">sync.Once分析</h1>
+          <h1 class="post-title" itemprop="name headline">Golang内存分配:(1):Free-List</h1>
         
 
         <div class="post-meta">
@@ -273,8 +277,8 @@
               
                 <span class="post-meta-item-text">发表于</span>
               
-              <time title="创建于" itemprop="dateCreated datePublished" datetime="2020-04-06T09:23:13+08:00">
-                2020-04-06
+              <time title="创建于" itemprop="dateCreated datePublished" datetime="2020-04-11T22:09:38+08:00">
+                2020-04-11
               </time>
             
 
@@ -333,18 +337,37 @@
       
 
       
-        <p><strong>sync.Once</strong>可以保证在多个协程或者多次调用一个函数时，函数最终只会执行一次。</p>
-<h2 id="使用方法"><a href="#使用方法" class="headerlink" title="使用方法"></a>使用方法</h2><figure class="highlight go"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> once sync.Once</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">InitFunc</span><span class="params">()</span></span> &#123;</span><br><span class="line">	fmt.Println(<span class="string">"Init Func"</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">main</span><span class="params">()</span></span> &#123;</span><br><span class="line">	<span class="keyword">for</span> i := <span class="number">0</span>; i &lt; <span class="number">10</span>; i++&#123;</span><br><span class="line">		once.Do(InitFunc)</span><br><span class="line">	&#125;</span><br><span class="line">	</span><br><span class="line">	once.Do(<span class="function"><span class="keyword">func</span><span class="params">()</span></span> &#123;</span><br><span class="line">		fmt.Println(<span class="string">"Func"</span>)</span><br><span class="line">	&#125;)</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+        <p>为了分配管理内存，首先要知道哪些内存已经使用哪些内存是空闲的，目前主要有两种方式：<strong>线性分配(Bump Allocator)</strong>和<strong>可利用空间表(Free-List Allocator)</strong>。</p>
+<h2 id="线性分配-Bump-Allocator"><a href="#线性分配-Bump-Allocator" class="headerlink" title="线性分配 Bump Allocator"></a>线性分配 Bump Allocator</h2><p>线性分配非常简单，这种方式只需要维护一个指针，初始时指向内存的起点，当分配内存时，只需检测空闲内存是否足够并不断地移动指针位置即可。</p>
+<img src="/2020/04/11/Free-List/%E7%BA%BF%E6%80%A7%E5%88%86%E9%85%8D.jpg" class="" title="线性分配">
 
-<p>执行这段代码，最终只会打印一次 <strong>Init Func</strong>。</p>
+<p>线性分配在分配内存时高效且快速，但是在内存回收时就显得十分局限，这种方式下已经分配的内存无法回收，也就是无法重复利用已经释放的空间，这就大大降低了内存分配的效率。</p>
 <a id="more"></a>
 
-<h2 id="源码刨析"><a href="#源码刨析" class="headerlink" title="源码刨析"></a>源码刨析</h2><figure class="highlight go"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">type</span> Once <span class="keyword">struct</span> &#123;</span><br><span class="line">	done <span class="keyword">uint32</span> <span class="comment">//用来标记是否已经执行过了</span></span><br><span class="line">	m    Mutex <span class="comment">//互斥锁</span></span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="params">(o *Once)</span> <span class="title">Do</span><span class="params">(f <span class="keyword">func</span>()</span>)</span> &#123;</span><br><span class="line">    <span class="comment">// 原子操作，获取done的值，done为0进入doSlow</span></span><br><span class="line">	<span class="keyword">if</span> atomic.LoadUint32(&amp;o.done) == <span class="number">0</span> &#123;</span><br><span class="line">		o.doSlow(f)</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="params">(o *Once)</span> <span class="title">doSlow</span><span class="params">(f <span class="keyword">func</span>()</span>)</span> &#123;</span><br><span class="line">	o.m.Lock()</span><br><span class="line">	<span class="keyword">defer</span> o.m.Unlock()</span><br><span class="line">	<span class="keyword">if</span> o.done == <span class="number">0</span> &#123;</span><br><span class="line">        <span class="comment">//使用defer 等f()执行结束后再修改 done的值</span></span><br><span class="line">		<span class="keyword">defer</span> atomic.StoreUint32(&amp;o.done, <span class="number">1</span>)</span><br><span class="line">		f()</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<h2 id="可利用空间表-Free-List-Allocator"><a href="#可利用空间表-Free-List-Allocator" class="headerlink" title="可利用空间表 Free-List Allocator"></a>可利用空间表 Free-List Allocator</h2><p><strong>可利用空间表</strong>将内存分为若干个块，这些块之间使用指针连接，构成一个链表，分配内存时，从链表头部取出节点，当释放内存时只需将这个节点重新插到链表尾部就可完成回收。但是建立链表时，每一个节点的大小取多少合适呢，根据节点大小的不同，可利用空间表一般有三种实现方式:</p>
+<ul>
+<li><p><strong>每个节点大小相同</strong></p>
+<img src="/2020/04/11/Free-List/%E8%8A%82%E7%82%B9%E5%A4%A7%E5%B0%8F%E7%9B%B8%E5%90%8C.jpg" class="" title="节点大小相同">
 
-<p>有人可能会对 <strong><em>doSlow</em></strong>设计产生疑惑，考虑这样一种情况：</p>
-<p>假如有一个方法<strong>connect</strong>，用来连接数据库/服务器，这个连接过程可能会需要一段时间来完成。有两个<strong>Goroutine</strong>都使用 <strong>Once.Do()</strong>来调用这个方法。第一个<strong>Goroutine</strong>先被调度，开始执行<strong>connect</strong>，第二个<strong>Goroutine</strong>执行到<strong>Once.Do()</strong>时，可能还没有完成连接，也就是 <strong>connect</strong>函数还未返回。如果此时<strong>Once.Do()</strong>直接返回，那么由于连接并没有完成，接下来的操作就会遇到问题。所以<strong>doSlow</strong>设计当多个<strong>Goroutine</strong>同时调用<strong>Once.Do()</strong>时，直到执行的方法返回，<strong>Once.Do()</strong>才返回。用伪代码描述如下：</p>
-<figure class="highlight go"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> once sync.Once</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">connect</span><span class="params">()</span></span> &#123;</span><br><span class="line">	fmt.Println(<span class="string">"connect Func"</span>)</span><br><span class="line">    <span class="comment">// 模拟连接耗时</span></span><br><span class="line">	time.Sleep(<span class="number">3</span>*time.Second)</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">main</span><span class="params">()</span></span> &#123;</span><br><span class="line">	<span class="keyword">for</span> i := <span class="number">0</span>; i &lt; <span class="number">10</span>; i++&#123;</span><br><span class="line">		<span class="keyword">go</span> <span class="function"><span class="keyword">func</span><span class="params">()</span></span> &#123;</span><br><span class="line">			fmt.Println(<span class="string">"Goroutine Start"</span>)</span><br><span class="line">			once.Do(connect)</span><br><span class="line">			fmt.Println(<span class="string">"Goroutine Done"</span>)</span><br><span class="line">		&#125;()</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	<span class="keyword">select</span> &#123;&#125;</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<p>每个节点大小一样，分配时直接按顺序取出节点即可，但是这种方法，可能将大块内存分为小块，导致内存使用率不高，同时也无法满足大块内存的申请。</p>
+</li>
+<li><p><strong>节点有多种规模</strong></p>
+<p>节点的大小不固定，但还在同一链表中。这时分配内存又有多种策略。</p>
+<ul>
+<li><p>首次适配法</p>
+<p>依次遍历链表，找到第一个大于等于需要的空间大小的节点。</p>
+</li>
+<li><p>最佳适配法</p>
+<p>节点按大小排序，找到第一个大于等于所需空间的节点。</p>
+</li>
+</ul>
+</li>
+<li><p><strong>根据节点不同大小，分为多条链表</strong></p>
+<img src="/2020/04/11/Free-List/%E5%A4%9A%E6%9D%A1%E9%93%BE%E8%A1%A8.jpg" class="" title="多条链表">
 
+<p>将内存分割成多个链表，每个链表中的内存块大小相同，申请内存时先找到满足条件的链表，再从链表中选择合适的内存块。</p>
+</li>
+</ul>
 
       
     </div>
@@ -369,8 +392,8 @@
         <div class="post-nav">
           <div class="post-nav-next post-nav-item">
             
-              <a href="/2020/04/04/%E8%B5%B7%E7%82%B9/" rel="next" title="起点">
-                <i class="fa fa-chevron-left"></i> 起点
+              <a href="/2020/04/09/sync-WaitGroup/" rel="next" title="sync.WaitGroup分析">
+                <i class="fa fa-chevron-left"></i> sync.WaitGroup分析
               </a>
             
           </div>
@@ -458,7 +481,7 @@
               
                 <a href="/archives/%7C%7C%20archive">
               
-                  <span class="site-state-item-count">2</span>
+                  <span class="site-state-item-count">4</span>
                   <span class="site-state-item-name">日志</span>
                 </a>
               </div>
@@ -469,7 +492,7 @@
               
               <div class="site-state-item site-state-categories">
                 <a href="/categories/index.html">
-                  <span class="site-state-item-count">1</span>
+                  <span class="site-state-item-count">2</span>
                   <span class="site-state-item-name">分类</span>
                 </a>
               </div>
@@ -520,7 +543,7 @@
             
 
             
-              <div class="post-toc-content"><ol class="nav"><li class="nav-item nav-level-2"><a class="nav-link" href="#使用方法"><span class="nav-number">1.</span> <span class="nav-text">使用方法</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#源码刨析"><span class="nav-number">2.</span> <span class="nav-text">源码刨析</span></a></li></ol></div>
+              <div class="post-toc-content"><ol class="nav"><li class="nav-item nav-level-2"><a class="nav-link" href="#线性分配-Bump-Allocator"><span class="nav-number">1.</span> <span class="nav-text">线性分配 Bump Allocator</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#可利用空间表-Free-List-Allocator"><span class="nav-number">2.</span> <span class="nav-text">可利用空间表 Free-List Allocator</span></a></li></ol></div>
             
 
           </div>
